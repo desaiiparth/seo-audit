@@ -42,6 +42,18 @@ In **APIs & Services > Library**, enable:
 3. Go to **Settings > Users and permissions**.
 4. Add the service account email from the JSON as a user.
 
+
+### OAuth login setup (alternative to service account)
+1. Go to **Google Cloud Console**: https://console.cloud.google.com/
+2. Open **APIs & Services > Credentials**.
+3. Click **Create credentials** > **OAuth client ID**.
+4. Choose **Desktop app**.
+5. Download the JSON file.
+6. Rename it to `oauth_client.json`.
+7. Upload it to your Codespaces/project root.
+8. Run the script with `--oauth-client-file oauth_client.json`.
+9. Complete the browser login flow; the script stores your token in `token.json` for reuse.
+
 ### 5) Create an API key (for PageSpeed)
 1. In Google Cloud, go to **APIs & Services > Credentials**.
 2. Click **Create credentials** > **API key**.
@@ -68,11 +80,48 @@ python3 seo_audit.py \
   --output "reports"
 ```
 
+OAuth example command:
+
+```bash
+python3 seo_audit.py \
+  --sitemap "https://elitewebsolutions.co/sitemap.xml" \
+  --site-url "https://elitewebsolutions.co/" \
+  --oauth-client-file "oauth_client.json" \
+  --oauth-console \
+  --inspection-limit 43 \
+  --output "reports"
+```
+
 This creates the folder automatically (if missing) and writes:
 - `reports/seo_audit_results_YYYY-MM-DD_HHMM.csv`
 - `reports/seo_audit_report_YYYY-MM-DD_HHMM.md`
 
 Timestamped filenames prevent scheduled or repeated audits from overwriting older exports.
+
+
+## OAuth in GitHub Codespaces (manual flow)
+
+`--oauth-console` is designed for environments where localhost callback handling is unreliable (like Codespaces).
+
+1. Run the script with both `--oauth-client-file oauth_client.json` and `--oauth-console`.
+2. The script prints a Google authorization URL in the terminal.
+3. Open that URL manually and log in.
+4. Google will return an authorization code (or redirect URL containing `code=`).
+5. Paste either the code or full redirected URL back into the terminal prompt.
+6. The script exchanges it for credentials and saves `token.json`.
+7. Future runs reuse `token.json` automatically.
+
+Codespaces OAuth example command:
+
+```bash
+python3 seo_audit.py \
+  --sitemap "https://elitewebsolutions.co/sitemap.xml" \
+  --site-url "https://elitewebsolutions.co/" \
+  --oauth-client-file "oauth_client.json" \
+  --oauth-console \
+  --inspection-limit 43 \
+  --output "reports"
+```
 
 ## Safe basic test run (no API keys)
 
