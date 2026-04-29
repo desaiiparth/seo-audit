@@ -26,7 +26,7 @@ from googleapiclient.discovery import build
 
 USER_AGENT = "SEOAuditAgent/3.0 (+https://example.com)"
 TIMEOUT_SECONDS = 20
-PAGESPEED_TIMEOUT_SECONDS = 120
+PAGESPEED_TIMEOUT_SECONDS = 180
 SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
 
@@ -98,8 +98,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--pagespeed-limit",
         type=int,
-        default=0,
-        help="If > 0, run PageSpeed only for the first N crawled URLs.",
+        default=None,
+        help="Optional: run PageSpeed only for the first N crawled URLs.",
     )
     parser.add_argument(
         "--pagespeed-api-key",
@@ -514,6 +514,21 @@ def extract_performance_issues(audits_blob: dict) -> list[str]:
     return issues
 
 
+
+def parse_pagespeed_error_message(response: requests.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        text = response.text.strip()
+        return text or f"HTTP {response.status_code}"
+
+    error = payload.get("error", {}) if isinstance(payload, dict) else {}
+    message = error.get("message") if isinstance(error, dict) else None
+    if message:
+        return str(message)
+    return f"HTTP {response.status_code}"
+
+
 def fetch_pagespeed_strategy(url: str, api_key: str, strategy: str, session: requests.Session) -> dict:
     endpoint = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
     params = {
@@ -522,33 +537,76 @@ def fetch_pagespeed_strategy(url: str, api_key: str, strategy: str, session: req
         "category": "performance",
         "key": api_key,
     }
-    resp = session.get(endpoint, params=params, timeout=PAGESPEED_TIMEOUT_SECONDS)
-    resp.raise_for_status()
-    return resp.json()
+
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = session.get(endpoint, params=params, timeout=PAGESPEED_TIMEOUT_SECONDS)
+        except requests.Timeout as exc:
+            if attempt == attempts:
+                raise RuntimeError(f"timed out after {PAGESPEED_TIMEOUT_SECONDS} seconds") from exc
+            continue
+        except requests.RequestException as exc:
+            if attempt == attempts:
+                raise RuntimeError(str(exc)) from exc
+            continue
+
+        if 500 <= resp.status_code <= 599:
+            if attempt == attempts:
+                raise RuntimeError(f"HTTP {resp.status_code}: {parse_pagespeed_error_message(resp)}")
+            continue
+
+        if resp.status_code >= 400:
+            raise RuntimeError(parse_pagespeed_error_message(resp))
+
+        return resp.json()
+
+    raise RuntimeError("PageSpeed request failed after retries")
+
+
+def run_pagespeed_preflight(url: str, api_key: str, session: requests.Session) -> str:
+    fetch_pagespeed_strategy(url, api_key, "mobile", session)
+    return "ok"
 
 
 def enrich_with_pagespeed(
     audits: list[PageAudit],
     api_key: str,
     session: requests.Session,
-    pagespeed_limit: int = 0,
+    pagespeed_limit: int | None = None,
 ) -> dict[str, str]:
-    summary = {"psi_enabled": "no", "psi_error": ""}
+    summary = {"psi_enabled": "no", "psi_error": "", "psi_requested": "0", "psi_collected": "0", "psi_failed": "0", "psi_top_errors": ""}
     if not api_key:
         summary["psi_error"] = "PageSpeed skipped: missing --pagespeed-api-key."
         return summary
 
     summary["psi_enabled"] = "yes"
-    selected = audits[:pagespeed_limit] if pagespeed_limit and pagespeed_limit > 0 else audits
-    if pagespeed_limit and pagespeed_limit > 0:
+
+    preflight_target = (audits[0].final_url or audits[0].url) if audits else ""
+    try:
+        run_pagespeed_preflight(preflight_target, api_key, session)
+    except Exception as exc:  # noqa: BLE001
+        msg = f"PageSpeed preflight failed for {preflight_target}: {exc}"
+        summary["psi_error"] = msg
+        for audit in audits:
+            audit.psi_note = f"pagespeed_error: {exc}"
+        return summary
+
+    selected = audits
+    if pagespeed_limit is not None and pagespeed_limit > 0:
+        selected = audits[:pagespeed_limit]
         for audit in audits[pagespeed_limit:]:
-            audit.psi_note = f"not_run: pagespeed_limit={pagespeed_limit}"
+            audit.psi_note = "not_requested_due_to_pagespeed_limit"
+
     total = len(selected)
+    failures = Counter()
+    collected = 0
     for idx, audit in enumerate(selected, 1):
         target = audit.final_url or audit.url
-        print(f"[PageSpeed {idx}/{total}] Checking mobile and desktop for {target}")
+        print(f"[PageSpeed {idx}/{total}] Checking {target} mobile")
         try:
             mobile = fetch_pagespeed_strategy(target, api_key, "mobile", session)
+            print(f"[PageSpeed {idx}/{total}] Checking {target} desktop")
             desktop = fetch_pagespeed_strategy(target, api_key, "desktop", session)
 
             m_lh = mobile.get("lighthouseResult", {})
@@ -572,8 +630,17 @@ def enrich_with_pagespeed(
             audit.desktop_performance_issues = " | ".join(desktop_issues)
             audit.opportunities_diagnostics = " | ".join(opportunities)
             audit.psi_note = "collected"
+            collected += 1
         except Exception as exc:  # noqa: BLE001
-            audit.psi_note = str(exc)
+            err = f"pagespeed_error: {exc}"
+            audit.psi_note = err
+            failures[err] += 1
+
+    summary["psi_requested"] = str(total)
+    summary["psi_collected"] = str(collected)
+    summary["psi_failed"] = str(total - collected)
+    if failures:
+        summary["psi_top_errors"] = " | ".join(f"{k} ({v})" for k, v in failures.most_common(5))
     return summary
 
 
@@ -823,11 +890,18 @@ def build_markdown_report(
             "",
             "## PageSpeed Snapshot",
             "",
+            f"- PageSpeed URLs requested: **{psi_summary.get('psi_requested', '0')}**",
+            f"- PageSpeed URLs collected: **{psi_summary.get('psi_collected', '0')}**",
+            f"- PageSpeed URLs failed: **{psi_summary.get('psi_failed', '0')}**",
             f"- Pages with PageSpeed data: **{len(psi_pages)}**",
             f"- Average mobile performance score: **{avg_perf}**",
             "",
         ]
     )
+
+    if psi_summary.get("psi_top_errors"):
+        lines.append(f"- Top PageSpeed errors: {psi_summary['psi_top_errors']}")
+        lines.append("")
 
     if status_counts:
         lines.append("## HTTP Status Distribution")
