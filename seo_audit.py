@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -85,6 +85,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--credentials-file", default="gsc_credentials.json")
     parser.add_argument("--oauth-client-file", default="", help="OAuth client JSON for interactive Google login")
+    parser.add_argument(
+        "--oauth-manual",
+        action="store_true",
+        help="Use manual OAuth flow by pasting redirected localhost URL (Codespaces-friendly).",
+    )
     parser.add_argument("--site-url", default="", help="Search Console property URL")
     parser.add_argument("--start-date", default=(date.today() - timedelta(days=28)).isoformat())
     parser.add_argument("--end-date", default=(date.today() - timedelta(days=1)).isoformat())
@@ -304,7 +309,30 @@ def audit_page(url: str, session: requests.Session) -> PageAudit:
         return PageAudit(**base)
 
 
-def get_search_console_service(credentials_file: str = "", oauth_client_file: str = "", token_file: str = "token.json"):
+def run_manual_oauth_flow(oauth_client_file: str) -> Credentials:
+    flow = InstalledAppFlow.from_client_secrets_file(oauth_client_file, SCOPES)
+    flow.redirect_uri = "http://localhost:8080/"
+    auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+    print("\nManual OAuth mode enabled (--oauth-manual).")
+    print("Open this URL in your browser to authorize access:")
+    print(auth_url)
+    print("\nAfter Google redirects, copy the full localhost URL from your browser address bar.")
+    redirected_url = input("Paste the full localhost URL here: ").strip()
+    parsed = urlparse(redirected_url)
+    params = parse_qs(parsed.query)
+    code = params.get("code", [None])[0]
+    if not code:
+        raise ValueError("Authorization code not found in pasted URL.")
+    flow.fetch_token(code=code)
+    return flow.credentials
+
+
+def get_search_console_service(
+    credentials_file: str = "",
+    oauth_client_file: str = "",
+    token_file: str = "token.json",
+    oauth_manual: bool = False,
+):
     if oauth_client_file:
         creds = None
         token_path = Path(token_file)
@@ -315,8 +343,11 @@ def get_search_console_service(credentials_file: str = "", oauth_client_file: st
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
-                flow = InstalledAppFlow.from_client_secrets_file(oauth_client_file, SCOPES)
-                creds = flow.run_local_server(port=0)
+                if oauth_manual:
+                    creds = run_manual_oauth_flow(oauth_client_file)
+                else:
+                    flow = InstalledAppFlow.from_client_secrets_file(oauth_client_file, SCOPES)
+                    creds = flow.run_local_server(port=0)
             token_path.write_text(creds.to_json(), encoding="utf-8")
 
         return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
@@ -406,6 +437,7 @@ def enrich_with_gsc(
     start_date: str,
     end_date: str,
     inspection_limit: int,
+    oauth_manual: bool,
 ) -> dict[str, str]:
     summary = {"gsc_enabled": "no", "gsc_error": "", "inspection_selected": "0", "inspection_skipped": "0"}
     if not site_url:
@@ -421,7 +453,11 @@ def enrich_with_gsc(
         return summary
 
     try:
-        service = get_search_console_service(credentials_file=credentials_file, oauth_client_file=oauth_client_file)
+        service = get_search_console_service(
+            credentials_file=credentials_file,
+            oauth_client_file=oauth_client_file,
+            oauth_manual=oauth_manual,
+        )
         page_metrics, top_queries = fetch_gsc_page_metrics(service, site_url, start_date, end_date)
         for audit in audits:
             key = normalize_url_for_match(audit.final_url or audit.url)
@@ -848,6 +884,7 @@ def main() -> int:
         start_date=args.start_date,
         end_date=args.end_date,
         inspection_limit=args.inspection_limit,
+        oauth_manual=args.oauth_manual,
     )
     psi_summary = enrich_with_pagespeed(audits, args.pagespeed_api_key, session)
     ai_summary = generate_ai_analysis(audits, args.openai_api_key, args.openai_model, session)
