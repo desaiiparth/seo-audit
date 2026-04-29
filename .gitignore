@@ -6,3 +6,5 @@ gsc_credentials.json
 credentials.json
 reports/
 *.log
+oauth_client.json
+token.json

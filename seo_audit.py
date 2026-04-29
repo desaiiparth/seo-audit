@@ -19,6 +19,9 @@ from urllib.parse import urljoin, urlparse
 import requests
 from bs4 import BeautifulSoup
 from google.oauth2 import service_account
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
 USER_AGENT = "SEOAuditAgent/3.0 (+https://example.com)"
@@ -81,6 +84,7 @@ def parse_args() -> argparse.Namespace:
         help="Output folder (example: reports). If set, files are auto-created inside it.",
     )
     parser.add_argument("--credentials-file", default="gsc_credentials.json")
+    parser.add_argument("--oauth-client-file", default="", help="OAuth client JSON for interactive Google login")
     parser.add_argument("--site-url", default="", help="Search Console property URL")
     parser.add_argument("--start-date", default=(date.today() - timedelta(days=28)).isoformat())
     parser.add_argument("--end-date", default=(date.today() - timedelta(days=1)).isoformat())
@@ -300,7 +304,23 @@ def audit_page(url: str, session: requests.Session) -> PageAudit:
         return PageAudit(**base)
 
 
-def get_search_console_service(credentials_file: str):
+def get_search_console_service(credentials_file: str = "", oauth_client_file: str = "", token_file: str = "token.json"):
+    if oauth_client_file:
+        creds = None
+        token_path = Path(token_file)
+        if token_path.exists():
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(oauth_client_file, SCOPES)
+                creds = flow.run_local_server(port=0)
+            token_path.write_text(creds.to_json(), encoding="utf-8")
+
+        return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
+
     creds = service_account.Credentials.from_service_account_file(credentials_file, scopes=SCOPES)
     return build("searchconsole", "v1", credentials=creds, cache_discovery=False)
 
@@ -381,18 +401,27 @@ def inspect_urls(service, site_url: str, audits: list[PageAudit], inspection_lim
 def enrich_with_gsc(
     audits: list[PageAudit],
     credentials_file: str,
+    oauth_client_file: str,
     site_url: str,
     start_date: str,
     end_date: str,
     inspection_limit: int,
 ) -> dict[str, str]:
     summary = {"gsc_enabled": "no", "gsc_error": "", "inspection_selected": "0", "inspection_skipped": "0"}
-    if not credentials_file or not Path(credentials_file).exists() or not site_url:
-        summary["gsc_error"] = "GSC skipped: missing --credentials-file or --site-url."
+    if not site_url:
+        summary["gsc_error"] = "GSC skipped: missing --site-url."
+        return summary
+
+    if oauth_client_file:
+        if not Path(oauth_client_file).exists():
+            summary["gsc_error"] = "GSC skipped: --oauth-client-file not found."
+            return summary
+    elif not credentials_file or not Path(credentials_file).exists():
+        summary["gsc_error"] = "GSC skipped: missing --credentials-file or provide --oauth-client-file."
         return summary
 
     try:
-        service = get_search_console_service(credentials_file)
+        service = get_search_console_service(credentials_file=credentials_file, oauth_client_file=oauth_client_file)
         page_metrics, top_queries = fetch_gsc_page_metrics(service, site_url, start_date, end_date)
         for audit in audits:
             key = normalize_url_for_match(audit.final_url or audit.url)
@@ -814,6 +843,7 @@ def main() -> int:
     gsc_summary = enrich_with_gsc(
         audits,
         credentials_file=args.credentials_file,
+        oauth_client_file=args.oauth_client_file,
         site_url=args.site_url,
         start_date=args.start_date,
         end_date=args.end_date,
