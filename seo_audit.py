@@ -269,7 +269,7 @@ def audit_page(url: str, session: requests.Session) -> PageAudit:
         mobile_performance_issues="",
         desktop_performance_issues="",
         opportunities_diagnostics="",
-        psi_note="not_requested",
+        psi_note="unavailable",
     )
     try:
         response = session.get(url, timeout=TIMEOUT_SECONDS, allow_redirects=True)
@@ -565,6 +565,8 @@ def fetch_pagespeed_strategy(url: str, api_key: str, strategy: str, session: req
 
 
 def run_pagespeed_preflight(url: str, api_key: str, session: requests.Session) -> str:
+    if not url:
+        raise RuntimeError("no URL available for PageSpeed preflight")
     fetch_pagespeed_strategy(url, api_key, "mobile", session)
     return "ok"
 
@@ -603,10 +605,10 @@ def enrich_with_pagespeed(
     collected = 0
     for idx, audit in enumerate(selected, 1):
         target = audit.final_url or audit.url
-        print(f"[PageSpeed {idx}/{total}] Checking {target} mobile")
+        print(f"[PageSpeed {idx}/{total}] Checking mobile for {target}")
         try:
             mobile = fetch_pagespeed_strategy(target, api_key, "mobile", session)
-            print(f"[PageSpeed {idx}/{total}] Checking {target} desktop")
+            print(f"[PageSpeed {idx}/{total}] Checking desktop for {target}")
             desktop = fetch_pagespeed_strategy(target, api_key, "desktop", session)
 
             m_lh = mobile.get("lighthouseResult", {})
@@ -615,10 +617,16 @@ def enrich_with_pagespeed(
             d_audits = d_lh.get("audits", {})
 
             perf = m_lh.get("categories", {}).get("performance", {}).get("score")
-            audit.performance_score = round(float(perf) * 100, 1) if perf is not None else 0.0
-            audit.lcp = str(m_audits.get("largest-contentful-paint", {}).get("displayValue", "unavailable"))
-            audit.inp = str(m_audits.get("interaction-to-next-paint", {}).get("displayValue", "unavailable"))
-            audit.cls = str(m_audits.get("cumulative-layout-shift", {}).get("displayValue", "unavailable"))
+            if perf is not None:
+                audit.performance_score = round(float(perf) * 100, 1)
+            lcp_value = m_audits.get("largest-contentful-paint", {}).get("displayValue")
+            inp_value = m_audits.get("interaction-to-next-paint", {}).get("displayValue")
+            if not inp_value:
+                inp_value = m_audits.get("max-potential-fid", {}).get("displayValue")
+            cls_value = m_audits.get("cumulative-layout-shift", {}).get("displayValue")
+            audit.lcp = str(lcp_value or "unavailable")
+            audit.inp = str(inp_value or "unavailable")
+            audit.cls = str(cls_value or "unavailable")
 
             mobile_issues = extract_performance_issues(m_audits)
             desktop_issues = extract_performance_issues(d_audits)
