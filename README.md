@@ -42,6 +42,18 @@ In **APIs & Services > Library**, enable:
 3. Go to **Settings > Users and permissions**.
 4. Add the service account email from the JSON as a user.
 
+
+### OAuth login setup (alternative to service account)
+1. Go to **Google Cloud Console**: https://console.cloud.google.com/
+2. Open **APIs & Services > Credentials**.
+3. Click **Create credentials** > **OAuth client ID**.
+4. Choose **Desktop app**.
+5. Download the JSON file.
+6. Rename it to `oauth_client.json`.
+7. Upload it to your Codespaces/project root.
+8. Run the script with `--oauth-client-file oauth_client.json`.
+9. Complete the browser login flow; the script stores your token in `token.json` for reuse.
+
 ### 5) Create an API key (for PageSpeed)
 1. In Google Cloud, go to **APIs & Services > Credentials**.
 2. Click **Create credentials** > **API key**.
@@ -65,6 +77,17 @@ python3 seo_audit.py \
   --openai-api-key "YOUR_OPENAI_API_KEY" \
   --openai-model "gpt-4.1" \
   --inspection-limit 100 \
+  --output "reports"
+```
+
+OAuth example command:
+
+```bash
+python3 seo_audit.py \
+  --sitemap "https://elitewebsolutions.co/sitemap.xml" \
+  --site-url "https://elitewebsolutions.co/" \
+  --oauth-client-file "oauth_client.json" \
+  --inspection-limit 43 \
   --output "reports"
 ```
 
