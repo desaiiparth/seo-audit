@@ -54,6 +54,18 @@ In **APIs & Services > Library**, enable:
 8. Run the script with `--oauth-client-file oauth_client.json`.
 9. Complete the browser login flow; the script stores your token in `token.json` for reuse.
 
+### Codespaces-friendly manual OAuth (`--oauth-manual`)
+Use this when automatic localhost callback handling is not available in Codespaces/remote terminals.
+
+1. Run with both `--oauth-client-file` and `--oauth-manual`.
+2. The script prints the Google authorization URL.
+3. Open that URL manually in your browser and approve access.
+4. Google redirects to a localhost URL in your browser.
+5. Copy the **full localhost URL** from the browser address bar.
+6. Paste that full URL back into the terminal when prompted.
+7. The script extracts the authorization code, exchanges it for tokens, and saves `token.json`.
+8. Future runs automatically reuse `token.json` until refresh/re-auth is needed.
+
 ### 5) Create an API key (for PageSpeed)
 1. In Google Cloud, go to **APIs & Services > Credentials**.
 2. Click **Create credentials** > **API key**.
@@ -87,6 +99,7 @@ python3 seo_audit.py \
   --sitemap "https://elitewebsolutions.co/sitemap.xml" \
   --site-url "https://elitewebsolutions.co/" \
   --oauth-client-file "oauth_client.json" \
+  --oauth-manual \
   --inspection-limit 43 \
   --output "reports"
 ```
