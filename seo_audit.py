@@ -826,57 +826,88 @@ def enrich_with_ahrefs(site_url: str, api_key: str, country: str, limit: int, ca
     if not api_key:
         out.note = 'Ahrefs skipped: missing --ahrefs-api-key or AHREFS_API_KEY.'
         return out
+
     target = extract_domain(site_url) or site_url
     base = 'https://api.ahrefs.com/v3'
+    protocol = 'https' if target == 'elitewebsolutions.co' else ''
+    normalized_country = (country or 'US').upper()
+    base_params = {'target': target, 'mode': 'subdomains', 'country': normalized_country}
+    if protocol:
+        base_params['protocol'] = protocol
     errors: list[str] = []
 
-    def safe(endpoint: str, params: dict[str, Any]) -> dict:
+    def extract_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            return []
+        for key in ('rows', 'data', 'items', 'results', 'pages', 'keywords', 'competitors', 'backlinks', 'broken_backlinks'):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [r for r in value if isinstance(r, dict)]
+        return []
+
+    def safe(endpoint: str, params: dict[str, Any], label: str) -> dict:
+        print(f'[Ahrefs] {label}')
         try:
             return fetch_ahrefs(f'{base}/{endpoint}', params, api_key, session, cache_hours)
         except Exception as exc:  # noqa: BLE001
             errors.append(f'{endpoint}: {exc}')
             return {}
 
-    preflight = safe('subscription-info', {})
+    print('[Ahrefs] Checking API access')
+    preflight_params = dict(base_params)
+    preflight = safe('site-explorer-metrics', preflight_params, 'Fetching site metrics')
     if not preflight:
-        preflight = safe('usage', {})
+        last_error = errors[-1] if errors else 'Unknown error'
+        out.note = last_error
+        if 'HTTP 401' in last_error:
+            out.note = f'Ahrefs unauthorized: check API key or Ahrefs plan/API access. ({last_error})'
+        elif 'HTTP 404' in last_error:
+            out.note = f'Ahrefs endpoint path is wrong. ({last_error})'
+        elif any(x in last_error.lower() for x in ('quota', 'permission', 'forbidden', 'insufficient')):
+            out.note = last_error
+        return out
 
-    overview = safe('site-explorer/overview', {'target': target, 'country': country})
-    top_pages = safe('site-explorer/top-pages', {'target': target, 'country': country, 'limit': limit})
-    keywords = safe('site-explorer/organic-keywords', {'target': target, 'country': country, 'limit': limit})
-    competitors = safe('site-explorer/organic-competitors', {'target': target, 'country': country, 'limit': limit})
-    backlinks = safe('site-explorer/backlinks-summary', {'target': target})
-    broken = safe('site-explorer/broken-backlinks', {'target': target, 'limit': limit})
+    metrics = preflight.get('metrics', preflight) if isinstance(preflight, dict) else {}
+    out.estimated_organic_traffic = str(metrics.get('org_traffic', metrics.get('organic_traffic', '')))
+    out.organic_keywords_count = str(metrics.get('org_keywords', metrics.get('organic_keywords', '')))
+    out.traffic_value = str(metrics.get('org_cost', metrics.get('traffic_value', '')))
 
-    ov = overview.get('metrics', overview) if isinstance(overview, dict) else {}
-    out.domain_rating = str(ov.get('domain_rating', ov.get('dr', '')))
-    out.estimated_organic_traffic = str(ov.get('organic_traffic', ''))
-    out.organic_keywords_count = str(ov.get('organic_keywords', ''))
-    out.backlinks_count = str(ov.get('backlinks', ''))
-    out.referring_domains_count = str(ov.get('refdomains', ov.get('referring_domains', '')))
-    out.traffic_value = str(ov.get('traffic_value', ''))
+    domain_rating = safe('site-explorer-domain-rating', dict(base_params), 'Fetching domain rating')
+    top_pages = safe('site-explorer-top-pages', {**base_params, 'limit': limit}, 'Fetching top pages')
+    keywords = safe('site-explorer-organic-keywords', {**base_params, 'limit': limit}, 'Fetching organic keywords')
+    competitors = safe('site-explorer-organic-competitors', {**base_params, 'limit': limit}, 'Fetching competitors')
+    backlinks = safe('site-explorer-backlinks-stats', dict(base_params), 'Fetching backlink stats')
+    broken = safe('site-explorer-broken-backlinks', {**base_params, 'limit': limit}, 'Fetching broken backlinks')
 
-    kw_rows = keywords.get('keywords', keywords.get('rows', [])) if isinstance(keywords, dict) else []
-    out.top_keywords = ' | '.join(str(x.get('keyword', '')) for x in kw_rows[:10] if isinstance(x, dict))
+    dr_payload = domain_rating.get('metrics', domain_rating) if isinstance(domain_rating, dict) else {}
+    out.domain_rating = str(dr_payload.get('domain_rating', dr_payload.get('dr', '')))
+
+    back_payload = backlinks.get('metrics', backlinks) if isinstance(backlinks, dict) else {}
+    out.backlinks_count = str(back_payload.get('backlinks', ''))
+    out.referring_domains_count = str(back_payload.get('referring_domains', back_payload.get('refdomains', '')))
+    out.link_opportunities = f"Ref domains: {out.referring_domains_count or 'n/a'}; Backlinks: {out.backlinks_count or 'n/a'}"
+
+    page_rows = extract_rows(top_pages)
+    out.top_pages = ' | '.join(str(x.get('url', '')) for x in page_rows[:10] if x.get('url'))
+
+    kw_rows = extract_rows(keywords)
+    out.top_keywords = ' | '.join(str(x.get('keyword', '')) for x in kw_rows[:10] if x.get('keyword'))
     out.top_keyword_positions = ' | '.join(str(x.get('position', '')) for x in kw_rows[:10] if isinstance(x, dict))
     out.top_keyword_volumes = ' | '.join(str(x.get('volume', '')) for x in kw_rows[:10] if isinstance(x, dict))
-    out.content_opportunities = ' | '.join(f"{x.get('keyword','')} (pos {x.get('position','?')}, vol {x.get('volume','?')})" for x in kw_rows[:10] if isinstance(x, dict))
+    out.content_opportunities = ' | '.join(
+        f"{x.get('keyword','')} (pos {x.get('position','?')}, vol {x.get('volume','?')})" for x in kw_rows[:10] if x.get('keyword')
+    )
 
-    page_rows = top_pages.get('pages', top_pages.get('rows', [])) if isinstance(top_pages, dict) else []
-    out.top_pages = ' | '.join(str(x.get('url', x.get('page', ''))) for x in page_rows[:10] if isinstance(x, dict))
+    comp_rows = extract_rows(competitors)
+    out.organic_competitors = ' | '.join(
+        f"{x.get('domain', x.get('competitor', ''))} (common_kw {x.get('common_keywords', x.get('keywords', '?'))}, traffic {x.get('traffic', '?')})"
+        for x in comp_rows[:10] if isinstance(x, dict)
+    )
 
-    comp_rows = competitors.get('competitors', competitors.get('rows', [])) if isinstance(competitors, dict) else []
-    out.organic_competitors = ' | '.join(str(x.get('domain', x.get('competitor', ''))) for x in comp_rows[:10] if isinstance(x, dict))
-
-    back_sum = backlinks.get('summary', backlinks) if isinstance(backlinks, dict) else {}
-    if not out.backlinks_count:
-        out.backlinks_count = str(back_sum.get('backlinks', ''))
-    if not out.referring_domains_count:
-        out.referring_domains_count = str(back_sum.get('refdomains', ''))
-    out.link_opportunities = f"Ref domains: {out.referring_domains_count}; Backlinks: {out.backlinks_count}"
-
-    broken_rows = broken.get('rows', broken.get('broken_backlinks', [])) if isinstance(broken, dict) else []
-    out.broken_backlinks = ' | '.join(str(x.get('source_url', x.get('url_from', ''))) for x in broken_rows[:10] if isinstance(x, dict))
+    broken_rows = extract_rows(broken)
+    out.broken_backlinks = ' | '.join(
+        str(x.get('broken_url') or x.get('url_to') or x.get('target_url') or '') for x in broken_rows[:10]
+    )
 
     out.note = 'ok' if not errors else '; '.join(errors)
     return out

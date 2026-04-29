@@ -101,8 +101,8 @@ python3 seo_audit.py \
   --site-url "https://elitewebsolutions.co/" \
   --oauth-client-file "oauth_client.json" \
   --pagespeed-api-key "$PAGESPEED_API_KEY" \
-  --ahrefs-api-key "$AHREFS_API_KEY" \
-  --ahrefs-country "in" \
+  --ahrefs-api-key "YOUR_AHREFS_API_KEY_HERE" \
+  --ahrefs-country "IN" \
   --ahrefs-limit 50 \
   --pagespeed-limit 5 \
   --inspection-limit 43 \
