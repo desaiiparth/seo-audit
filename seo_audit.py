@@ -130,7 +130,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--openai-api-key", default="", help="OpenAI API key for AI analysis section")
     parser.add_argument("--openai-model", default="gpt-4.1", help="OpenAI model for AI analysis")
     parser.add_argument("--ahrefs-api-key", default="", help="Ahrefs API v3 key (or set AHREFS_API_KEY)")
-    parser.add_argument("--ahrefs-country", default="us", help="Ahrefs country database (example: us, in)")
+    parser.add_argument("--ahrefs-country", default="US", help="Ahrefs country database (example: US, IN)")
     parser.add_argument("--ahrefs-limit", type=int, default=50, help="Max rows to request from Ahrefs list endpoints")
     parser.add_argument("--ahrefs-cache-hours", type=int, default=24, help="Cache life for Ahrefs API responses")
     return parser.parse_args()
@@ -827,13 +827,10 @@ def enrich_with_ahrefs(site_url: str, api_key: str, country: str, limit: int, ca
         out.note = 'Ahrefs skipped: missing --ahrefs-api-key or AHREFS_API_KEY.'
         return out
 
-    target = extract_domain(site_url) or site_url
+    target = 'elitewebsolutions.co'
     base = 'https://api.ahrefs.com/v3'
-    protocol = 'https' if target == 'elitewebsolutions.co' else ''
     normalized_country = (country or 'US').upper()
-    base_params = {'target': target, 'mode': 'subdomains', 'country': normalized_country}
-    if protocol:
-        base_params['protocol'] = protocol
+    base_params = {'target': target, 'mode': 'subdomains', 'country': normalized_country, 'protocol': 'https'}
     errors: list[str] = []
 
     def extract_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -845,17 +842,16 @@ def enrich_with_ahrefs(site_url: str, api_key: str, country: str, limit: int, ca
                 return [r for r in value if isinstance(r, dict)]
         return []
 
-    def safe(endpoint: str, params: dict[str, Any], label: str) -> dict:
-        print(f'[Ahrefs] {label}')
+    def safe(endpoint_path: str, params: dict[str, Any]) -> dict:
+        print(f'[Ahrefs] GET {endpoint_path}')
         try:
-            return fetch_ahrefs(f'{base}/{endpoint}', params, api_key, session, cache_hours)
+            return fetch_ahrefs(f'{base}{endpoint_path}', params, api_key, session, cache_hours)
         except Exception as exc:  # noqa: BLE001
-            errors.append(f'{endpoint}: {exc}')
+            errors.append(f'{endpoint_path}: {exc}')
             return {}
 
-    print('[Ahrefs] Checking API access')
     preflight_params = dict(base_params)
-    preflight = safe('site-explorer-metrics', preflight_params, 'Fetching site metrics')
+    preflight = safe('/site-explorer/metrics', preflight_params)
     if not preflight:
         last_error = errors[-1] if errors else 'Unknown error'
         out.note = last_error
@@ -872,12 +868,12 @@ def enrich_with_ahrefs(site_url: str, api_key: str, country: str, limit: int, ca
     out.organic_keywords_count = str(metrics.get('org_keywords', metrics.get('organic_keywords', '')))
     out.traffic_value = str(metrics.get('org_cost', metrics.get('traffic_value', '')))
 
-    domain_rating = safe('site-explorer-domain-rating', dict(base_params), 'Fetching domain rating')
-    top_pages = safe('site-explorer-top-pages', {**base_params, 'limit': limit}, 'Fetching top pages')
-    keywords = safe('site-explorer-organic-keywords', {**base_params, 'limit': limit}, 'Fetching organic keywords')
-    competitors = safe('site-explorer-organic-competitors', {**base_params, 'limit': limit}, 'Fetching competitors')
-    backlinks = safe('site-explorer-backlinks-stats', dict(base_params), 'Fetching backlink stats')
-    broken = safe('site-explorer-broken-backlinks', {**base_params, 'limit': limit}, 'Fetching broken backlinks')
+    domain_rating = safe('/site-explorer/domain-rating', dict(base_params))
+    top_pages = safe('/site-explorer/top-pages', {**base_params, 'limit': limit})
+    keywords = safe('/site-explorer/organic-keywords', {**base_params, 'limit': limit})
+    competitors = safe('/site-explorer/organic-competitors', {**base_params, 'limit': limit})
+    backlinks = safe('/site-explorer/backlinks-stats', dict(base_params))
+    broken = safe('/site-explorer/broken-backlinks', {**base_params, 'limit': limit})
 
     dr_payload = domain_rating.get('metrics', domain_rating) if isinstance(domain_rating, dict) else {}
     out.domain_rating = str(dr_payload.get('domain_rating', dr_payload.get('dr', '')))
