@@ -99,7 +99,8 @@ python3 seo_audit.py \
   --sitemap "https://elitewebsolutions.co/sitemap.xml" \
   --site-url "https://elitewebsolutions.co/" \
   --oauth-client-file "oauth_client.json" \
-  --oauth-manual \
+  --pagespeed-api-key "$PAGESPEED_API_KEY" \
+  --pagespeed-limit 5 \
   --inspection-limit 43 \
   --output "reports"
 ```

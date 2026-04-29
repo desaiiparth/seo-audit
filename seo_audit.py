@@ -26,6 +26,7 @@ from googleapiclient.discovery import build
 
 USER_AGENT = "SEOAuditAgent/3.0 (+https://example.com)"
 TIMEOUT_SECONDS = 20
+PAGESPEED_TIMEOUT_SECONDS = 120
 SCOPES = ["https://www.googleapis.com/auth/webmasters.readonly"]
 
 
@@ -94,6 +95,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start-date", default=(date.today() - timedelta(days=28)).isoformat())
     parser.add_argument("--end-date", default=(date.today() - timedelta(days=1)).isoformat())
     parser.add_argument("--inspection-limit", type=int, default=100)
+    parser.add_argument(
+        "--pagespeed-limit",
+        type=int,
+        default=0,
+        help="If > 0, run PageSpeed only for the first N crawled URLs.",
+    )
     parser.add_argument(
         "--pagespeed-api-key",
         default="",
@@ -515,20 +522,31 @@ def fetch_pagespeed_strategy(url: str, api_key: str, strategy: str, session: req
         "category": "performance",
         "key": api_key,
     }
-    resp = session.get(endpoint, params=params, timeout=TIMEOUT_SECONDS)
+    resp = session.get(endpoint, params=params, timeout=PAGESPEED_TIMEOUT_SECONDS)
     resp.raise_for_status()
     return resp.json()
 
 
-def enrich_with_pagespeed(audits: list[PageAudit], api_key: str, session: requests.Session) -> dict[str, str]:
+def enrich_with_pagespeed(
+    audits: list[PageAudit],
+    api_key: str,
+    session: requests.Session,
+    pagespeed_limit: int = 0,
+) -> dict[str, str]:
     summary = {"psi_enabled": "no", "psi_error": ""}
     if not api_key:
         summary["psi_error"] = "PageSpeed skipped: missing --pagespeed-api-key."
         return summary
 
     summary["psi_enabled"] = "yes"
-    for audit in audits:
+    selected = audits[:pagespeed_limit] if pagespeed_limit and pagespeed_limit > 0 else audits
+    if pagespeed_limit and pagespeed_limit > 0:
+        for audit in audits[pagespeed_limit:]:
+            audit.psi_note = f"not_run: pagespeed_limit={pagespeed_limit}"
+    total = len(selected)
+    for idx, audit in enumerate(selected, 1):
         target = audit.final_url or audit.url
+        print(f"[PageSpeed {idx}/{total}] Checking mobile and desktop for {target}")
         try:
             mobile = fetch_pagespeed_strategy(target, api_key, "mobile", session)
             desktop = fetch_pagespeed_strategy(target, api_key, "desktop", session)
@@ -555,7 +573,7 @@ def enrich_with_pagespeed(audits: list[PageAudit], api_key: str, session: reques
             audit.opportunities_diagnostics = " | ".join(opportunities)
             audit.psi_note = "collected"
         except Exception as exc:  # noqa: BLE001
-            audit.psi_note = f"psi_error: {exc}"
+            audit.psi_note = str(exc)
     return summary
 
 
@@ -839,6 +857,7 @@ def build_markdown_report(
                 f"- External links count: `{a.external_links_count}`",
                 f"- Structured data: `{a.structured_data or 'none_detected'}`",
                 f"- Images missing alt: `{a.images_missing_alt_count}`",
+                f"- PageSpeed status: `{a.psi_note}`",
                 f"- Evidence: {evidence}",
                 f"- Recommended fix (evidence-tied): {fixes}",
                 f"- Inspection note: `{a.inspection_note}` | PSI note: `{a.psi_note}`",
@@ -886,7 +905,7 @@ def main() -> int:
         inspection_limit=args.inspection_limit,
         oauth_manual=args.oauth_manual,
     )
-    psi_summary = enrich_with_pagespeed(audits, args.pagespeed_api_key, session)
+    psi_summary = enrich_with_pagespeed(audits, args.pagespeed_api_key, session, args.pagespeed_limit)
     ai_summary = generate_ai_analysis(audits, args.openai_api_key, args.openai_model, session)
 
     if args.output:
