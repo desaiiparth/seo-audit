@@ -8,6 +8,7 @@ This app audits every URL in your sitemap and combines:
 - URL Inspection evidence
 - Google PageSpeed Insights metrics
 - AI evidence-based analysis (OpenAI API)
+- Ahrefs API v3 domain/keyword/backlink intelligence (optional)
 
 ## What it collects per URL
 
@@ -92,7 +93,7 @@ python3 seo_audit.py \
   --output "reports"
 ```
 
-OAuth example command:
+Ahrefs + OAuth example command:
 
 ```bash
 python3 seo_audit.py \
@@ -100,6 +101,9 @@ python3 seo_audit.py \
   --site-url "https://elitewebsolutions.co/" \
   --oauth-client-file "oauth_client.json" \
   --pagespeed-api-key "$PAGESPEED_API_KEY" \
+  --ahrefs-api-key "$AHREFS_API_KEY" \
+  --ahrefs-country "in" \
+  --ahrefs-limit 50 \
   --pagespeed-limit 5 \
   --inspection-limit 43 \
   --output "reports"
@@ -120,6 +124,31 @@ python3 seo_audit.py \
 ```
 
 With this command, crawl + on-page extraction still runs, while Google Search Console, URL Inspection, PageSpeed, and AI analysis are skipped.
+
+
+
+## Ahrefs integration (optional, Phase 1)
+
+Ahrefs runs only when you provide `--ahrefs-api-key` or `AHREFS_API_KEY`.
+
+New CLI args:
+- `--ahrefs-api-key`
+- `--ahrefs-country` (default: `us`)
+- `--ahrefs-limit` (default: `50`)
+- `--ahrefs-cache-hours` (default: `24`)
+
+Environment variable:
+- `AHREFS_API_KEY`
+
+Authentication used for Ahrefs API v3:
+- `Authorization: Bearer YOUR_API_KEY`
+- `Accept: application/json`
+
+Caching:
+- Ahrefs responses are cached in `.cache/ahrefs/` to avoid wasting units.
+- Cache TTL is controlled by `--ahrefs-cache-hours`.
+
+If an Ahrefs endpoint fails (plan limit/quota/permission), exact endpoint error text is preserved in `ahrefs_note` and the audit continues.
 
 ## CSV output columns
 Includes all crawl + GSC + inspection fields, plus PageSpeed fields:

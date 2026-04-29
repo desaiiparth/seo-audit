@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -13,7 +15,7 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
@@ -73,6 +75,25 @@ class PageAudit:
     psi_note: str
 
 
+
+@dataclass
+class AhrefsData:
+    domain_rating: str = ""
+    estimated_organic_traffic: str = ""
+    organic_keywords_count: str = ""
+    backlinks_count: str = ""
+    referring_domains_count: str = ""
+    traffic_value: str = ""
+    top_keywords: str = ""
+    top_keyword_positions: str = ""
+    top_keyword_volumes: str = ""
+    top_pages: str = ""
+    organic_competitors: str = ""
+    broken_backlinks: str = ""
+    link_opportunities: str = ""
+    content_opportunities: str = ""
+    note: str = "not_requested"
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run an SEO audit from sitemap.xml")
     parser.add_argument("--sitemap-url", default="", help="Absolute URL to sitemap.xml or sitemap index")
@@ -108,6 +129,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--openai-api-key", default="", help="OpenAI API key for AI analysis section")
     parser.add_argument("--openai-model", default="gpt-4.1", help="OpenAI model for AI analysis")
+    parser.add_argument("--ahrefs-api-key", default="", help="Ahrefs API v3 key (or set AHREFS_API_KEY)")
+    parser.add_argument("--ahrefs-country", default="us", help="Ahrefs country database (example: us, in)")
+    parser.add_argument("--ahrefs-limit", type=int, default=50, help="Max rows to request from Ahrefs list endpoints")
+    parser.add_argument("--ahrefs-cache-hours", type=int, default=24, help="Cache life for Ahrefs API responses")
     return parser.parse_args()
 
 
@@ -767,7 +792,96 @@ def generate_ai_analysis(
         return summary
 
 
-def save_csv(rows: Iterable[PageAudit], output_csv: Path) -> None:
+
+
+def ensure_cache_dir() -> Path:
+    path = Path('.cache/ahrefs')
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def ahrefs_cache_key(endpoint: str, params: dict[str, Any]) -> str:
+    raw = json.dumps({'endpoint': endpoint, 'params': params}, sort_keys=True)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def fetch_ahrefs(endpoint: str, params: dict[str, Any], api_key: str, session: requests.Session, cache_hours: int) -> dict:
+    cache_dir = ensure_cache_dir()
+    key = ahrefs_cache_key(endpoint, params)
+    cache_file = cache_dir / f'{key}.json'
+    if cache_file.exists():
+        age = datetime.now(timezone.utc) - datetime.fromtimestamp(cache_file.stat().st_mtime, tz=timezone.utc)
+        if age <= timedelta(hours=max(1, cache_hours)):
+            return json.loads(cache_file.read_text(encoding='utf-8'))
+    resp = session.get(endpoint, params=params, headers={'Authorization': f'Bearer {api_key}', 'Accept': 'application/json'}, timeout=TIMEOUT_SECONDS)
+    if resp.status_code >= 400:
+        raise RuntimeError(f'HTTP {resp.status_code}: {resp.text.strip()}')
+    data = resp.json()
+    cache_file.write_text(json.dumps(data), encoding='utf-8')
+    return data
+
+
+def enrich_with_ahrefs(site_url: str, api_key: str, country: str, limit: int, cache_hours: int, session: requests.Session) -> AhrefsData:
+    out = AhrefsData()
+    if not api_key:
+        out.note = 'Ahrefs skipped: missing --ahrefs-api-key or AHREFS_API_KEY.'
+        return out
+    target = extract_domain(site_url) or site_url
+    base = 'https://api.ahrefs.com/v3'
+    errors: list[str] = []
+
+    def safe(endpoint: str, params: dict[str, Any]) -> dict:
+        try:
+            return fetch_ahrefs(f'{base}/{endpoint}', params, api_key, session, cache_hours)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f'{endpoint}: {exc}')
+            return {}
+
+    preflight = safe('subscription-info', {})
+    if not preflight:
+        preflight = safe('usage', {})
+
+    overview = safe('site-explorer/overview', {'target': target, 'country': country})
+    top_pages = safe('site-explorer/top-pages', {'target': target, 'country': country, 'limit': limit})
+    keywords = safe('site-explorer/organic-keywords', {'target': target, 'country': country, 'limit': limit})
+    competitors = safe('site-explorer/organic-competitors', {'target': target, 'country': country, 'limit': limit})
+    backlinks = safe('site-explorer/backlinks-summary', {'target': target})
+    broken = safe('site-explorer/broken-backlinks', {'target': target, 'limit': limit})
+
+    ov = overview.get('metrics', overview) if isinstance(overview, dict) else {}
+    out.domain_rating = str(ov.get('domain_rating', ov.get('dr', '')))
+    out.estimated_organic_traffic = str(ov.get('organic_traffic', ''))
+    out.organic_keywords_count = str(ov.get('organic_keywords', ''))
+    out.backlinks_count = str(ov.get('backlinks', ''))
+    out.referring_domains_count = str(ov.get('refdomains', ov.get('referring_domains', '')))
+    out.traffic_value = str(ov.get('traffic_value', ''))
+
+    kw_rows = keywords.get('keywords', keywords.get('rows', [])) if isinstance(keywords, dict) else []
+    out.top_keywords = ' | '.join(str(x.get('keyword', '')) for x in kw_rows[:10] if isinstance(x, dict))
+    out.top_keyword_positions = ' | '.join(str(x.get('position', '')) for x in kw_rows[:10] if isinstance(x, dict))
+    out.top_keyword_volumes = ' | '.join(str(x.get('volume', '')) for x in kw_rows[:10] if isinstance(x, dict))
+    out.content_opportunities = ' | '.join(f"{x.get('keyword','')} (pos {x.get('position','?')}, vol {x.get('volume','?')})" for x in kw_rows[:10] if isinstance(x, dict))
+
+    page_rows = top_pages.get('pages', top_pages.get('rows', [])) if isinstance(top_pages, dict) else []
+    out.top_pages = ' | '.join(str(x.get('url', x.get('page', ''))) for x in page_rows[:10] if isinstance(x, dict))
+
+    comp_rows = competitors.get('competitors', competitors.get('rows', [])) if isinstance(competitors, dict) else []
+    out.organic_competitors = ' | '.join(str(x.get('domain', x.get('competitor', ''))) for x in comp_rows[:10] if isinstance(x, dict))
+
+    back_sum = backlinks.get('summary', backlinks) if isinstance(backlinks, dict) else {}
+    if not out.backlinks_count:
+        out.backlinks_count = str(back_sum.get('backlinks', ''))
+    if not out.referring_domains_count:
+        out.referring_domains_count = str(back_sum.get('refdomains', ''))
+    out.link_opportunities = f"Ref domains: {out.referring_domains_count}; Backlinks: {out.backlinks_count}"
+
+    broken_rows = broken.get('rows', broken.get('broken_backlinks', [])) if isinstance(broken, dict) else []
+    out.broken_backlinks = ' | '.join(str(x.get('source_url', x.get('url_from', ''))) for x in broken_rows[:10] if isinstance(x, dict))
+
+    out.note = 'ok' if not errors else '; '.join(errors)
+    return out
+
+def save_csv(rows: Iterable[PageAudit], output_csv: Path, ahrefs: AhrefsData) -> None:
     fields = [
         "url",
         "final_url",
@@ -808,12 +922,45 @@ def save_csv(rows: Iterable[PageAudit], output_csv: Path) -> None:
         "inspection_note",
         "psi_note",
         "error",
+        "ahrefs_domain_rating",
+        "ahrefs_estimated_organic_traffic",
+        "ahrefs_organic_keywords_count",
+        "ahrefs_backlinks_count",
+        "ahrefs_referring_domains_count",
+        "ahrefs_traffic_value",
+        "ahrefs_top_keywords",
+        "ahrefs_top_keyword_positions",
+        "ahrefs_top_keyword_volumes",
+        "ahrefs_top_pages",
+        "ahrefs_organic_competitors",
+        "ahrefs_broken_backlinks",
+        "ahrefs_link_opportunities",
+        "ahrefs_content_opportunities",
+        "ahrefs_note",
     ]
     with output_csv.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for row in rows:
-            writer.writerow(row.__dict__)
+            payload = dict(row.__dict__)
+            payload.update({
+                "ahrefs_domain_rating": ahrefs.domain_rating,
+                "ahrefs_estimated_organic_traffic": ahrefs.estimated_organic_traffic,
+                "ahrefs_organic_keywords_count": ahrefs.organic_keywords_count,
+                "ahrefs_backlinks_count": ahrefs.backlinks_count,
+                "ahrefs_referring_domains_count": ahrefs.referring_domains_count,
+                "ahrefs_traffic_value": ahrefs.traffic_value,
+                "ahrefs_top_keywords": ahrefs.top_keywords,
+                "ahrefs_top_keyword_positions": ahrefs.top_keyword_positions,
+                "ahrefs_top_keyword_volumes": ahrefs.top_keyword_volumes,
+                "ahrefs_top_pages": ahrefs.top_pages,
+                "ahrefs_organic_competitors": ahrefs.organic_competitors,
+                "ahrefs_broken_backlinks": ahrefs.broken_backlinks,
+                "ahrefs_link_opportunities": ahrefs.link_opportunities,
+                "ahrefs_content_opportunities": ahrefs.content_opportunities,
+                "ahrefs_note": ahrefs.note,
+            })
+            writer.writerow(payload)
 
 
 def evidence_and_fix(a: PageAudit) -> tuple[str, str]:
@@ -854,6 +1001,7 @@ def build_markdown_report(
     gsc_summary: dict[str, str],
     psi_summary: dict[str, str],
     ai_summary: dict[str, str],
+    ahrefs: AhrefsData,
 ) -> str:
     total = len(audits)
     successful = sum(1 for a in audits if not a.error)
@@ -875,6 +1023,7 @@ def build_markdown_report(
         f"- **GSC integration enabled:** {gsc_summary.get('gsc_enabled', 'no')}",
         f"- **PageSpeed integration enabled:** {psi_summary.get('psi_enabled', 'no')}",
         f"- **AI analysis enabled:** {ai_summary.get('ai_enabled', 'no')}",
+        f"- **Ahrefs note:** {ahrefs.note}",
     ]
     if gsc_summary.get("gsc_error"):
         lines.append(f"- **GSC warning:** {gsc_summary['gsc_error']}")
@@ -947,6 +1096,9 @@ def build_markdown_report(
             ]
         )
 
+    lines.extend(["## Ahrefs Organic Visibility Summary", "", f"- Domain Rating: `{ahrefs.domain_rating or 'unavailable'}`", f"- Estimated organic traffic: `{ahrefs.estimated_organic_traffic or 'unavailable'}`", f"- Organic keywords: `{ahrefs.organic_keywords_count or 'unavailable'}`", f"- Backlinks: `{ahrefs.backlinks_count or 'unavailable'}`", f"- Referring domains: `{ahrefs.referring_domains_count or 'unavailable'}`", f"- Traffic value: `{ahrefs.traffic_value or 'unavailable'}`", ""])
+    lines.extend(["## Ahrefs Top Pages", "", ahrefs.top_pages or "unconfirmed: no Ahrefs top pages data.", "", "## Keyword Opportunities", "", ahrefs.content_opportunities or "unconfirmed: no Ahrefs keyword data.", "", "## Competitor Gap Opportunities", "", ahrefs.organic_competitors or "unconfirmed: no Ahrefs competitor data.", "", "## Backlink Opportunities", "", ahrefs.link_opportunities or "unconfirmed: no Ahrefs backlink summary.", "", "## Broken Backlink Recovery", "", ahrefs.broken_backlinks or "unconfirmed: broken backlinks endpoint unavailable.", "", "## Internal Link Opportunities Using Backlink Strength", "", f"Prioritize internal links to top Ahrefs pages: {ahrefs.top_pages or 'unconfirmed'}.", "", "## Content Opportunities", "", ahrefs.content_opportunities or "unconfirmed", "", "## Priority Roadmap", "", "- 30 days: validate top keyword/page gaps from Ahrefs metrics.", "- 60 days: publish/refresh pages for highest-volume keywords and competitor gaps.", "- 90 days: execute backlink reclamation and broken backlink recovery.", ""])
+
     if ai_summary.get("ai_analysis_md"):
         lines.extend(["## AI Evidence-Based Analysis", "", ai_summary["ai_analysis_md"], ""])
 
@@ -988,6 +1140,8 @@ def main() -> int:
         oauth_manual=args.oauth_manual,
     )
     psi_summary = enrich_with_pagespeed(audits, args.pagespeed_api_key, session, args.pagespeed_limit)
+    ahrefs_key = args.ahrefs_api_key or os.getenv('AHREFS_API_KEY', '')
+    ahrefs_data = enrich_with_ahrefs(args.site_url or sitemap_url, ahrefs_key, args.ahrefs_country, args.ahrefs_limit, args.ahrefs_cache_hours, session)
     ai_summary = generate_ai_analysis(audits, args.openai_api_key, args.openai_model, session)
 
     if args.output:
@@ -1002,9 +1156,9 @@ def main() -> int:
         output_csv.parent.mkdir(parents=True, exist_ok=True)
         output_report.parent.mkdir(parents=True, exist_ok=True)
 
-    save_csv(audits, output_csv)
+    save_csv(audits, output_csv, ahrefs_data)
     output_report.write_text(
-        build_markdown_report(audits, sitemap_url, str(output_csv), gsc_summary, psi_summary, ai_summary),
+        build_markdown_report(audits, sitemap_url, str(output_csv), gsc_summary, psi_summary, ai_summary, ahrefs_data),
         encoding="utf-8",
     )
 

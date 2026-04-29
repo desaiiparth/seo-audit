@@ -8,3 +8,5 @@ reports/
 *.log
 oauth_client.json
 token.json
+
+.cache/
