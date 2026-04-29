@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+gsc_credentials.json
+credentials.json
+oauth_client.json
+token.json
+reports/
+*.log
